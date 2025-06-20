@@ -1,11 +1,10 @@
 from flask import Flask, request
 import os
 import requests
-import openai
+from openai import OpenAI
 
 app = Flask(__name__)
 
-# 環境変数をprintして確認（本番運用時は消してください）
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 print("LINE_CHANNEL_ACCESS_TOKEN:", LINE_CHANNEL_ACCESS_TOKEN, flush=True)
@@ -19,15 +18,8 @@ REFERENCE_SITES = [
     {"name": "宇久町観光協会公式サイト", "url": "https://www.ukujima.com/", "type": "観光"},
 ]
 
-# 強制的にAI側に分岐させて、AIフローの動作だけ検証するテストモード
 def classify_message(text):
-    return "web"  # テスト用：常にAI要約側で実行
-    # # 本番運用時は下記に戻してください
-    # MAP_KEYWORDS = ["どこ", "場所", "行き方", "アクセス", "マップ", "地図"]
-    # if any(kw in text for kw in MAP_KEYWORDS):
-    #     return "map"
-    # else:
-    #     return "web"
+    return "web"  # デバッグ用（常にAI案内）
 
 def generate_web_summary(user_message):
     print("AI生成開始: ", user_message, flush=True)
@@ -35,17 +27,16 @@ def generate_web_summary(user_message):
     prompt = f"""下記の五島の観光サイトを参考に、「{user_message}」について旅行者向けに200文字程度で案内文を作成してください。回答には参考サイト名やURLも含めてください。
 {sites_info}
 """
-    openai.api_key = OPENAI_API_KEY
     try:
-        response = openai.ChatCompletion.create(
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": "あなたは五島の観光案内AIです。"},
                 {"role": "user", "content": prompt}
             ]
         )
-        print("OpenAI応答:", response, flush=True)
-        answer = response.choices[0].message['content']
+        answer = response.choices[0].message.content
         print("AI案内文:", answer, flush=True)
         return answer
     except Exception as e:
