@@ -3,7 +3,10 @@ import os
 import requests
 from openai import OpenAI
 import PyPDF2
+import chromadb
+from chromadb.utils import embedding_functions
 import glob
+import re
 
 app = Flask(__name__)
 
@@ -11,55 +14,81 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 DATA_DIR = "data"
 
-# PDF/TXTデータの全文をロード
-def load_all_texts(data_dir=DATA_DIR):
-    texts = []
+# --- [1] Embedding関数の用意（OpenAI埋め込みAPI利用）
+ef = embedding_functions.OpenAIEmbeddingFunction(
+    api_key=OPENAI_API_KEY,
+    model_name="text-embedding-3-small"
+)
+
+# --- [2] ChromaDBコレクション初期化
+client = chromadb.PersistentClient(path="./chroma_db")
+collection = client.get_or_create_collection(name="goto_kanko", embedding_function=ef)
+
+# --- [3] data/フォルダ全PDF・TXTを見出し単位で分割→コレクションに投入
+def load_docs_to_db():
+    all_texts = []
     # PDF
-    for filepath in glob.glob(os.path.join(data_dir, "*.pdf")):
+    for filepath in glob.glob(os.path.join(DATA_DIR, "*.pdf")):
         with open(filepath, "rb") as f:
             reader = PyPDF2.PdfReader(f)
-            for page in reader.pages:
+            for i, page in enumerate(reader.pages):
                 text = page.extract_text()
-                if text: texts.append(text)
+                if not text: continue
+                # タイトル(見出し)抽出のため、1行目や章番号っぽい行をピック
+                lines = text.split('\n')
+                for idx, line in enumerate(lines):
+                    if len(line.strip()) > 6 and re.match(r"^[0-9０-９一二三四五六七八九十]*[\.、． ]?", line.strip()):
+                        # 章タイトルとその後ろ10行ほどをセットで保存
+                        content = "\n".join(lines[idx:idx+12])
+                        docid = f"{os.path.basename(filepath)}-p{i}-l{idx}"
+                        collection.add(
+                            documents=[content],
+                            metadatas=[{"file": os.path.basename(filepath), "line": idx, "title": line[:60]}],
+                            ids=[docid]
+                        )
     # TXT
-    for filepath in glob.glob(os.path.join(data_dir, "*.txt")):
+    for filepath in glob.glob(os.path.join(DATA_DIR, "*.txt")):
         with open(filepath, "r", encoding="utf-8") as f:
-            texts.append(f.read())
-    return texts
+            text = f.read()
+        lines = text.split('\n')
+        for idx, line in enumerate(lines):
+            if len(line.strip()) > 6 and re.match(r"^[0-9０-９一二三四五六七八九十]*[\.、． ]?", line.strip()):
+                content = "\n".join(lines[idx:idx+10])
+                docid = f"{os.path.basename(filepath)}-l{idx}"
+                collection.add(
+                    documents=[content],
+                    metadatas=[{"file": os.path.basename(filepath), "line": idx, "title": line[:60]}],
+                    ids=[docid]
+                )
 
-ALL_TEXTS = load_all_texts()
+# 一度だけDB投入（ファイル更新時はサーバー再起動）
+if collection.count() == 0:
+    load_docs_to_db()
 
-# 簡易キーワード検索（AND条件）
-def search_best_paragraph(user_message, texts=ALL_TEXTS):
-    user_message = user_message.strip()
-    best = ""
-    max_count = 0
-    for text in texts:
-        for para in text.split("\n"):
-            count = sum([1 for w in user_message.split() if w in para])
-            if count > max_count:
-                max_count = count
-                best = para
-    return best.strip() if best else ""
+# --- [4] タイトル一致優先＋ベクトル類似検索
+def search_paragraph(user_message):
+    # (1) タイトル完全一致（部分一致）をまず探す
+    title_query = user_message.replace("について", "").replace("を教えて", "")
+    res = collection.get(where_document={"$contains": title_query})
+    if res and res['documents']:
+        return res['documents'][0]  # 最初にヒットしたもの
 
-# “行き方”系のワード判定
-def is_googlemap_query(user_message):
-    # 必要に応じてワード追加
-    keywords = [
-        "アクセス", "行き方", "場所", "マップ", "地図", "場所を教えて", "飲食店", "レストラン", "カフェ",
-        "どうやって行く", "行く方法", "何分", "最寄り駅", "近くの", "ここまでの行き方", "どうやって行けば"
-    ]
-    msg = user_message.lower()
-    return any(kw in msg for kw in keywords)
+    # (2) ベクトル検索で意味が近いパラグラフを抽出
+    search_res = collection.query(
+        query_texts=[user_message],
+        n_results=1
+    )
+    if search_res and search_res['documents'][0]:
+        return search_res['documents'][0][0]
+    return ""
 
-# AI回答（根拠テキストのみで、なければ「情報ありません」）
 def generate_answer(user_message):
-    related_text = search_best_paragraph(user_message)
+    related_text = search_paragraph(user_message)
     if not related_text or len(related_text) < 10:
-        return None  # 根拠なし
+        return "すみません、その件については現在の情報ではお答えできません。"
     prompt = (
-        f"あなたは五島の観光案内AIです。下記参考情報に根拠がある場合のみ正確に答えてください。"
-        "情報がなければ『情報がありません』とだけ返してください。\n\n"
+        "あなたは五島の観光公式AIです。以下の参考情報だけを根拠に、事実のみ正確に答えてください。"
+        "根拠が不十分な場合は「情報がありません」と返してください。\n\n"
         f"【参考情報】\n{related_text}"
     )
     try:
@@ -71,13 +100,10 @@ def generate_answer(user_message):
                 {"role": "user", "content": user_message}
             ]
         )
-        answer = response.choices[0].message.content.strip()
-        if "情報がありません" in answer or "分かりません" in answer or "お答えできません" in answer:
-            return None
-        return answer
+        return response.choices[0].message.content.strip()
     except Exception as e:
         print("OpenAI APIエラー:", e, flush=True)
-        return None
+        return "AIによる案内文生成中にエラーが発生しました。"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -87,18 +113,7 @@ def webhook():
         if event["type"] == "message" and event["message"]["type"] == "text":
             user_message = event["message"]["text"]
             reply_token = event["replyToken"]
-
-            # ① アクセス・行き方・飲食店など特定質問にはGoogleマップ検索リンク
-            if is_googlemap_query(user_message):
-                base_url = "https://www.google.com/maps/search/?api=1&query="
-                search_url = base_url + requests.utils.quote(user_message)
-                reply_text = f"Googleマップで検索できます！\n{search_url}"
-            else:
-                # ② それ以外は根拠ある場合だけAI回答。なければ「情報がありません」
-                reply_text = generate_answer(user_message)
-                if not reply_text:
-                    reply_text = "すみません、その件については現在の情報ではお答えできません。"
-
+            reply_text = generate_answer(user_message)
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
