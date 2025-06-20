@@ -3,3 +3,5 @@ requests
 python-dotenv
 openai
 PyPDF2
+chromadb
+tiktoken
