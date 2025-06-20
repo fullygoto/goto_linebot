@@ -1,54 +1,39 @@
 from flask import Flask, request
-import openai
 import os
 import requests
-from dotenv import load_dotenv
-
-load_dotenv()
 
 app = Flask(__name__)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-
-client = openai.OpenAI(api_key=OPENAI_API_KEY)
+LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     body = request.json
     events = body.get("events", [])
-
     for event in events:
         if event["type"] == "message" and event["message"]["type"] == "text":
             user_message = event["message"]["text"]
             reply_token = event["replyToken"]
 
-            # 【ここを最新版の記法に】
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "あなたは五島観光のAI案内人です。"},
-                    {"role": "user", "content": user_message}
-                ]
-            )
-            reply_text = response.choices[0].message.content
+            # Googleマップ検索URLを生成
+            base_url = "https://www.google.com/maps/search/?api=1&query="
+            search_url = base_url + requests.utils.quote(user_message)
 
+            # LINEに返信
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
             }
-            reply_data = {
+            data = {
                 "replyToken": reply_token,
-                "messages": [{"type": "text", "text": reply_text}]
+                "messages": [{
+                    "type": "text",
+                    "text": f"こちらで検索できます！\n{search_url}"
+                }]
             }
-
-            requests.post("https://api.line.me/v2/bot/message/reply", headers=headers, json=reply_data)
-
+            requests.post("https://api.line.me/v2/bot/message/reply", headers=headers, json=data)
     return "OK"
 
-
-import os
-
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))  # デフォルト10000番。Renderは自動でPORT環境変数を設定します
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
