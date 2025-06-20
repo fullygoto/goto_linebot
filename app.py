@@ -44,6 +44,9 @@ def generate_web_summary(user_message):
         ]
     )
     return response.choices[0].message['content']
+except Exception as e:
+    print("OpenAI APIエラー:", e)  # ここを追加
+    raise
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
