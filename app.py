@@ -47,5 +47,8 @@ def webhook():
     return "OK"
 
 
+import os
+
 if __name__ == "__main__":
-    app.run()
+    port = int(os.environ.get("PORT", 10000))  # デフォルト10000番。Renderは自動でPORT環境変数を設定します
+    app.run(host="0.0.0.0", port=port)
