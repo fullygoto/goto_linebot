@@ -6,6 +6,7 @@ import PyPDF2
 import chromadb
 from chromadb.utils import embedding_functions
 import glob
+from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
@@ -24,7 +25,6 @@ client = chromadb.PersistentClient(path="./chroma_db")
 collection = client.get_or_create_collection(name="goto_kanko", embedding_function=ef)
 
 # --- [3] テキストを一定行ごとに分割
-
 def split_text_paragraphs(text, window=10, step=5):
     lines = text.split('\n')
     chunks = []
@@ -35,7 +35,6 @@ def split_text_paragraphs(text, window=10, step=5):
     return chunks
 
 # --- [4] data/フォルダ全PDF・TXTを分割→コレクションに投入
-
 def load_docs_to_db():
     for filepath in glob.glob(os.path.join(DATA_DIR, "*.pdf")):
         with open(filepath, "rb") as f:
@@ -67,8 +66,7 @@ def load_docs_to_db():
 if collection.count() == 0:
     load_docs_to_db()
 
-# --- [5] タイトル一致優先＋ベクトル類似検索
-
+# --- [5] ChromaDB検索（タイトル部分一致＋ベクトル類似）
 def search_paragraph(user_message):
     title_query = user_message.replace("について", "").replace("を教えて", "")
     res = collection.get(where_document={"$contains": title_query})
@@ -79,7 +77,31 @@ def search_paragraph(user_message):
         return search_res['documents'][0][0]
     return ""
 
+# --- [6] 九州商船の運行状況をスクレイピング
+def get_kyusho_ferry_status():
+    url = "https://kyusho.co.jp/status"
+    try:
+        res = requests.get(url, timeout=8)
+        soup = BeautifulSoup(res.content, "html.parser")
+        ferry_sections = soup.find_all("section", class_="statusBox")
+        for section in ferry_sections:
+            title = section.find("h3")
+            if title and "長崎～五島航路" in title.get_text():
+                detail = section.find("div", class_="statusDetail")
+                if detail:
+                    return detail.get_text(separator='\n', strip=True)
+        return "九州商船 長崎～五島航路の運行状況を取得できませんでした。"
+    except Exception as e:
+        print("スクレイピングエラー:", e)
+        return "運行情報の取得中にエラーが発生しました。"
+
+# --- [7] AI応答生成＋Webスクレイピング分岐
 def generate_answer(user_message):
+    # 「九州商船」や「五島航路」などのキーワードで運行状況を返す
+    if ("九州商船" in user_message) or ("五島航路" in user_message) or \
+       ("長崎" in user_message and "運航" in user_message):
+        return get_kyusho_ferry_status()
+    # 通常の観光情報AI応答
     related_text = search_paragraph(user_message)
     if not related_text or len(related_text) < 10:
         return "すみません、その件については現在の情報ではお答えできません。"
@@ -102,6 +124,7 @@ def generate_answer(user_message):
         print("OpenAI APIエラー:", e, flush=True)
         return "AIによる案内文生成中にエラーが発生しました。"
 
+# --- [8] LINE webhook連携
 @app.route("/webhook", methods=["POST"])
 def webhook():
     body = request.json
