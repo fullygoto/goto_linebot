@@ -82,6 +82,7 @@ def get_kyusho_ferry_status():
     url = "https://kyusho.co.jp/status"
     try:
         res = requests.get(url, timeout=10)
+        print(res.text)  # これでhtml内容を必ず一度全部確認！
         soup = BeautifulSoup(res.content, "html.parser")
         # 「長崎〜五島」タブ
         nagasaki_goto = soup.find("div", class_="js-swich-target", attrs={"data-swich": "nagasaki_goto"})
