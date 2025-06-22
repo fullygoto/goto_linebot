@@ -14,17 +14,14 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 DATA_DIR = "data"
 
-# --- [1] Embedding関数の用意（OpenAI埋め込みAPI利用）
 ef = embedding_functions.OpenAIEmbeddingFunction(
     api_key=OPENAI_API_KEY,
     model_name="text-embedding-3-small"
 )
 
-# --- [2] ChromaDBコレクション初期化
 client = chromadb.PersistentClient(path="./chroma_db")
 collection = client.get_or_create_collection(name="goto_kanko", embedding_function=ef)
 
-# --- [3] テキストを一定行ごとに分割
 def split_text_paragraphs(text, window=10, step=5):
     lines = text.split('\n')
     chunks = []
@@ -34,7 +31,6 @@ def split_text_paragraphs(text, window=10, step=5):
             chunks.append(chunk)
     return chunks
 
-# --- [4] data/フォルダ全PDF・TXTを分割→コレクションに投入
 def load_docs_to_db():
     for filepath in glob.glob(os.path.join(DATA_DIR, "*.pdf")):
         with open(filepath, "rb") as f:
@@ -50,7 +46,6 @@ def load_docs_to_db():
                         metadatas=[{"file": os.path.basename(filepath), "page": i, "chunk": idx}],
                         ids=[docid]
                     )
-
     for filepath in glob.glob(os.path.join(DATA_DIR, "*.txt")):
         with open(filepath, "r", encoding="utf-8") as f:
             text = f.read()
@@ -62,11 +57,11 @@ def load_docs_to_db():
                 metadatas=[{"file": os.path.basename(filepath), "chunk": idx}],
                 ids=[docid]
             )
+    print("再投入後ドキュメント数:", collection.count())
 
 if collection.count() == 0:
     load_docs_to_db()
 
-# --- [5] ChromaDB検索（タイトル部分一致＋ベクトル類似）
 def search_paragraph(user_message):
     title_query = user_message.replace("について", "").replace("を教えて", "")
     res = collection.get(where_document={"$contains": title_query})
@@ -77,7 +72,6 @@ def search_paragraph(user_message):
         return search_res['documents'][0][0]
     return ""
 
-# --- [6] 九州商船の運行状況をスクレイピング
 def get_kyusho_ferry_status():
     url = "https://kyusho.co.jp/status"
     try:
@@ -95,13 +89,10 @@ def get_kyusho_ferry_status():
         print("スクレイピングエラー:", e)
         return "運行情報の取得中にエラーが発生しました。"
 
-# --- [7] AI応答生成＋Webスクレイピング分岐
 def generate_answer(user_message):
-    # 「九州商船」や「五島航路」などのキーワードで運行状況を返す
     if ("九州商船" in user_message) or ("五島航路" in user_message) or \
        ("長崎" in user_message and "運航" in user_message):
         return get_kyusho_ferry_status()
-    # 通常の観光情報AI応答
     related_text = search_paragraph(user_message)
     if not related_text or len(related_text) < 10:
         return "すみません、その件については現在の情報ではお答えできません。"
@@ -124,7 +115,6 @@ def generate_answer(user_message):
         print("OpenAI APIエラー:", e, flush=True)
         return "AIによる案内文生成中にエラーが発生しました。"
 
-# --- [8] LINE webhook連携
 @app.route("/webhook", methods=["POST"])
 def webhook():
     body = request.json
@@ -147,6 +137,17 @@ def webhook():
             }
             requests.post("https://api.line.me/v2/bot/message/reply", headers=headers, json=data)
     return "OK"
+
+# 🔄 データベース再投入用API
+@app.route("/reload", methods=["POST"])
+def reload_db():
+    try:
+        collection.delete()
+        load_docs_to_db()
+        return "DBリロード完了"
+    except Exception as e:
+        print("リロードエラー:", e)
+        return f"リロード失敗: {e}"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
