@@ -1,11 +1,11 @@
 from flask import Flask, request
 import os
+import glob
 import requests
 from openai import OpenAI
 import PyPDF2
 import chromadb
 from chromadb.utils import embedding_functions
-import glob
 from bs4 import BeautifulSoup
 
 app = Flask(__name__)
@@ -14,6 +14,7 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 DATA_DIR = "data"
 
+# Embedding function (OpenAI)
 ef = embedding_functions.OpenAIEmbeddingFunction(
     api_key=OPENAI_API_KEY,
     model_name="text-embedding-3-small"
@@ -22,6 +23,7 @@ ef = embedding_functions.OpenAIEmbeddingFunction(
 client = chromadb.PersistentClient(path="./chroma_db")
 collection = client.get_or_create_collection(name="goto_kanko", embedding_function=ef)
 
+# テキスト分割
 def split_text_paragraphs(text, window=10, step=5):
     lines = text.split('\n')
     chunks = []
@@ -31,6 +33,7 @@ def split_text_paragraphs(text, window=10, step=5):
             chunks.append(chunk)
     return chunks
 
+# データ再投入
 def load_docs_to_db():
     for filepath in glob.glob(os.path.join(DATA_DIR, "*.pdf")):
         with open(filepath, "rb") as f:
@@ -59,9 +62,11 @@ def load_docs_to_db():
             )
     print("再投入後ドキュメント数:", collection.count())
 
+# 最初だけ初期化
 if collection.count() == 0:
     load_docs_to_db()
 
+# ChromaDB検索
 def search_paragraph(user_message):
     title_query = user_message.replace("について", "").replace("を教えて", "")
     res = collection.get(where_document={"$contains": title_query})
@@ -72,24 +77,51 @@ def search_paragraph(user_message):
         return search_res['documents'][0][0]
     return ""
 
+# 九州商船 長崎～五島航路運行状況スクレイピング
 def get_kyusho_ferry_status():
     url = "https://kyusho.co.jp/status"
     try:
-        res = requests.get(url, timeout=8)
+        res = requests.get(url, timeout=10)
         soup = BeautifulSoup(res.content, "html.parser")
-        ferry_sections = soup.find_all("section", class_="statusBox")
-        for section in ferry_sections:
+        # 「長崎〜五島」タブ
+        nagasaki_goto = soup.find("div", class_="js-swich-target", attrs={"data-swich": "nagasaki_goto"})
+        if not nagasaki_goto:
+            return "運航状況の取得エリアが見つかりませんでした。"
+        result = ""
+        sections = nagasaki_goto.find_all("section", recursive=False)
+        for section in sections:
             title = section.find("h3")
-            if title and "長崎～五島航路" in title.get_text():
-                detail = section.find("div", class_="statusDetail")
-                if detail:
-                    return detail.get_text(separator='\n', strip=True)
-        return "九州商船 長崎～五島航路の運行状況を取得できませんでした。"
+            if title:
+                result += f"【{title.text.strip()}】\n"
+            port_sections = section.find_all("section", recursive=False)
+            for port in port_sections:
+                port_name = port.find("h4")
+                if not port_name:
+                    continue
+                port_name = port_name.text.strip()
+                table = port.find("table")
+                if not table:
+                    continue
+                rows = table.find_all("tr")
+                for row in rows:
+                    time_th = row.find("th")
+                    status_td = row.find("td", class_="unkou")
+                    if not time_th or not status_td:
+                        continue
+                    time_str = time_th.text.strip()
+                    img = status_td.find("img")
+                    status = img["alt"] if img and "alt" in img.attrs else ""
+                    result += f"{port_name}：{time_str} {status}\n"
+        if not result:
+            return "長崎〜五島航路の運航状況が見つかりませんでした。"
+        return result.strip()
     except Exception as e:
         print("スクレイピングエラー:", e)
         return "運行情報の取得中にエラーが発生しました。"
 
+# 回答生成
 def generate_answer(user_message):
+    # 九州商船運行状況キーワードなら
     if ("九州商船" in user_message) or ("五島航路" in user_message) or \
        ("長崎" in user_message and "運航" in user_message):
         return get_kyusho_ferry_status()
@@ -138,7 +170,7 @@ def webhook():
             requests.post("https://api.line.me/v2/bot/message/reply", headers=headers, json=data)
     return "OK"
 
-# 🔄 データベース再投入用API
+# DB再投入API
 @app.route("/reload", methods=["POST"])
 def reload_db():
     try:
