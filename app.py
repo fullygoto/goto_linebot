@@ -8,6 +8,11 @@ import chromadb
 from chromadb.utils import embedding_functions
 from bs4 import BeautifulSoup
 
+# Selenium用
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
+
 app = Flask(__name__)
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
@@ -77,17 +82,36 @@ def search_paragraph(user_message):
         return search_res['documents'][0][0]
     return ""
 
-# 九州商船 長崎～五島航路運行状況スクレイピング
+# SeleniumによるHTML取得
+def get_html_with_selenium(url):
+    options = Options()
+    options.add_argument('--headless')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    driver = webdriver.Chrome(ChromeDriverManager().install(), options=options)
+    driver.get(url)
+    html = driver.page_source
+    driver.quit()
+    return html
+
+# 九州商船 長崎～五島航路運行状況スクレイピング（requests→なければSeleniumで再取得）
 def get_kyusho_ferry_status():
     url = "https://kyusho.co.jp/status"
     try:
+        # 1. まずrequestsでアクセス
         res = requests.get(url, timeout=10)
-        print(res.text)  # これでhtml内容を必ず一度全部確認！
         soup = BeautifulSoup(res.content, "html.parser")
-        # 「長崎〜五島」タブ
         nagasaki_goto = soup.find("div", class_="js-swich-target", attrs={"data-swich": "nagasaki_goto"})
+
+        # 2. requestsで見つからなければSeleniumで再取得
+        if not nagasaki_goto:
+            html = get_html_with_selenium(url)
+            soup = BeautifulSoup(html, "html.parser")
+            nagasaki_goto = soup.find("div", class_="js-swich-target", attrs={"data-swich": "nagasaki_goto"})
+        
         if not nagasaki_goto:
             return "運航状況の取得エリアが見つかりませんでした。"
+
         result = ""
         sections = nagasaki_goto.find_all("section", recursive=False)
         for section in sections:

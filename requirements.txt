@@ -6,3 +6,4 @@ PyPDF2
 chromadb
 tiktoken
 beautifulsoup4
+selenium
