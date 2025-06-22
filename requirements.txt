@@ -6,4 +6,5 @@ PyPDF2
 chromadb
 tiktoken
 beautifulsoup4
+webdriver_manager
 selenium
